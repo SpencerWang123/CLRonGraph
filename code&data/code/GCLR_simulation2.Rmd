@@ -1,0 +1,263 @@
+---
+title: "GCLR_simulation_3"
+author: "Spencer Wang"
+date: "2025-07-11"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Simulation Setting  
+type of networks：  
+-full connected network   
+-path network  
+-chessboard network  
+-SBM network  
+-LFR network & DCSBM(not yet)    
+
+cluster scale setting: 25*4=100    
+
+comparing algorithms:  
+-Gibbs sampler 
+-H Spath greedy  
+-FMR  
+
+## Generating Data X&Y  
+```{r}
+#X 随机数生成
+set.seed(123)
+n1=25;n2=25;n3=25;n4=25;
+N=100
+X=as.matrix(cbind(rep(1,N),#截距项
+                  rnorm(N,0,1),#X1
+                  rnorm(N,0,1)))#X2
+X_no_intercept=X[,-1]
+#beta (n*4)*3
+coef_mat=matrix(c(0,0,0,0,
+                  1,1,-1,-1,
+                  1,-1,1,-1),byrow = T,nrow = 3)#3*4
+
+#epsilon
+#homoscedastic 
+#identical error among groups
+#Normal Distribution
+e0=rnorm(N,0,0.2)
+hetero_e=(X_no_intercept[,1]+X_no_intercept[,2])
+e=e0*hetero_e
+#Y 
+Y_all=X%*%coef_mat+e
+Y=c(Y_all[1:n1,1],Y_all[(n1+1):(n1+n2),2],Y_all[(n1+n2+1):(n1+n2+n3),3],Y_all[(n1+n2+n3+1):N,4])
+
+par(mfrow=c(1,2))
+plot(X[,2],Y,col=rep(c("red","blue","green","orange"),c(n1,n2,n3,n4)),pch=16,xlab = "X1")
+plot(X[,3],Y,col=rep(c("red","blue","green","orange"),c(n1,n2,n3,n4)),pch=16,xlab = "X2")
+```
+
+# parallel computation  
+
+randomly generating network and X&Y for 50 times   
+```{r}
+#X 随机数生成
+simulation_3_parallel=function(seed=1,true_clusters=4)
+{
+#generating X & Y. #############################################################
+library(CLRonGraph)
+set.seed(seed)
+n1=25;n2=25;n3=25;n4=25;
+N=100
+X=as.matrix(cbind(rep(1,N),#intercept
+                  rnorm(N),#X1
+                  rnorm(N)))#X2
+X_no_intercept=X[,-1]
+#beta (n*4)*3
+coef_mat=matrix(c(0,0,0,0,
+                  1,1,-1,-1,
+                  1,-1,1,-1),byrow = T,nrow = 3)#3*4
+
+#epsilon #homoscedastic #identical error among groups #Normal Distribution
+e0=rnorm(N,0,0.2)
+hetero_e=(X_no_intercept[,1]+X_no_intercept[,2])
+e=e0*hetero_e
+
+Y_all=X%*%coef_mat+e#Y 
+Y=c(Y_all[1:n1,1],Y_all[(n1+1):(n1+n2),2],Y_all[(n1+n2+1):(n1+n2+n3),3],Y_all[(n1+n2+n3+1):N,4])
+K_seq=2:6
+#generating network#############################################################
+library(igraph)
+#adjacency full connect
+adj_full=matrix(rep(1,N^2),ncol=N);
+adj_full=adj_full-diag(N);
+colnames(adj_full)=1:N;rownames(adj_full)=colnames(adj_full)
+
+#adjacency path connect
+adj_path=matrix(rep(0,N^2),ncol=N);
+adj_path[1:(N-1),2:N]=diag(N-1);
+adj_path=adj_path+t(adj_path)
+colnames(adj_path)=1:N;rownames(adj_path)=colnames(adj_path)
+
+#adjacency chessboard
+edge_length=N^0.5
+clu_edg_len=edge_length/2
+CB_G=make_lattice(dimvector = c(edge_length,edge_length))
+layout_mat=matrix(1:N,byrow = T,nrow = edge_length)
+group_1_index=as.numeric(layout_mat[1:clu_edg_len,1:clu_edg_len])
+group_2_index=as.numeric(layout_mat[clu_edg_len+(1:clu_edg_len),1:clu_edg_len])
+group_3_index=as.numeric(layout_mat[1:clu_edg_len,clu_edg_len+(1:clu_edg_len)])
+group_4_index=as.numeric(layout_mat[clu_edg_len+(1:clu_edg_len),clu_edg_len+(1:clu_edg_len)])
+col_mat=data.frame(id=c(group_1_index,group_2_index,group_3_index,group_4_index),
+                   col=rep(c("red","blue","green","orange"),c(n1,n2,n3,n4)),true_label=rep(1:4,c(n1,n2,n3,n4)))
+col_mat=col_mat[order(col_mat$id),]
+id_order=c(group_1_index,group_2_index,group_3_index,group_4_index)#used to rearrange order of row of reg data 
+adj_chessboard=as_adjacency_matrix(CB_G)
+
+#adjacency SBM
+set.seed(123)
+a=0.2;b=0.02
+pref_mat=matrix(c(a,b,b,b,
+                  b,a,b,b,
+                  b,b,a,b,
+                  b,b,b,a),byrow = T,nrow = 4)
+SBM_G=sample_sbm(N,pref_mat,block.sizes=c(n1,n2,n3,n4))
+adj_sbm=as.matrix(as_adjacency_matrix(SBM_G))
+
+##algorithm implementation######################################################
+library(flexmix)
+temp_seed=seed
+#reg data & real_cofficients
+reg_dt=data.frame(y=Y,X_no_intercept)#[order(id_order),]
+real_coefficients=t(coef_mat[,rep(1:4,c(n1,n2,n3,n4))])
+reg_dt_CBG=data.frame(y=Y,X_no_intercept)[order(id_order),]
+real_coefficients_CBG=t(coef_mat[,rep(1:4,c(n1,n2,n3,n4))])[order(id_order),]
+true_label_CBG=col_mat$true_label
+
+#Full Graph
+FG_HSpath=GCLR_HSpath(reg_dt = reg_dt,K_seq=K_seq,true_label = rep(1:4,c(n1,n2,n3,n4)),real_coefficients = real_coefficients,partition = "mixed",seed=temp_seed)
+FG_FMR=GCLR_FMR(reg_dt = reg_dt,K_seq=K_seq,true_label = rep(1:4,c(n1,n2,n3,n4)),real_coefficients = real_coefficients,partition = "mixed",seed=temp_seed)
+#Full Graph
+FG_Gibbs=GCLR(reg_dt = reg_dt,adj_mat = adj_full,K_seq=K_seq,true_label = rep(1:4,c(n1,n2,n3,n4)),partition = "mixed",real_coefficients = real_coefficients,greedy_refine = T,seed=temp_seed,lambda = 1,rounds = 130,burning_period = 30)
+
+##using path criterion  
+#Path Graph
+PG_Gibbs=GCLR(reg_dt = reg_dt,adj_mat = adj_path,K_seq=K_seq,true_label = rep(1:4,c(n1,n2,n3,n4)),partition = "mixed",real_coefficients = real_coefficients,greedy_refine = T,seed=temp_seed,rounds = 130,burning_period = 30,greedy_lambda = 3)
+#Chessboard Graph
+CBG_Gibbs=GCLR(reg_dt = reg_dt_CBG,adj_mat = adj_chessboard,K_seq=K_seq,true_label = true_label_CBG,real_coefficients = real_coefficients_CBG,partition = "mixed",greedy_refine = T,seed=temp_seed,rounds = 130,burning_period = 30)
+#SBM Graph
+SBMG_Gibbs=GCLR(reg_dt = reg_dt,adj_mat = adj_sbm,K_seq=K_seq,true_label = rep(1:4,c(n1,n2,n3,n4)),real_coefficients = real_coefficients,partition = "mixed",greedy_refine = T,seed=temp_seed,rounds = 130,burning_period = 30)
+
+##using 
+
+results_summary_BIC=data.frame(rbind(FG_FMR$best_model_BIC$assessment,FG_HSpath$best_model_BIC$assessment,
+                          FG_Gibbs$best_model_BIC$assessment,PG_Gibbs$best_model_BIC$assessment,
+                          CBG_Gibbs$best_model_BIC$assessment,SBMG_Gibbs$best_model_BIC$assessment))
+results_summary_eBIC=data.frame(rbind(FG_FMR$best_model_eBIC$assessment,FG_HSpath$best_model_eBIC$assessment,
+                          FG_Gibbs$best_model_eBIC$assessment,PG_Gibbs$best_model_eBIC$assessment,
+                          CBG_Gibbs$best_model_eBIC$assessment,SBMG_Gibbs$best_model_eBIC$assessment))
+##exact true cluster number data  
+true_index=which(K_seq==true_clusters)
+true_cluster_num_assessment=as.data.frame(rbind(FG_FMR$assessment[true_index,],FG_HSpath$assessment[true_index,],FG_Gibbs$assessment[true_index,],
+      PG_Gibbs$assessment[true_index,],CBG_Gibbs$assessment[true_index,],SBMG_Gibbs$assessment[true_index,]))
+
+#best labels at true cluster number
+true_cluster_num_labels=as.data.frame(cbind(FG_FMR$labels[,true_index],FG_HSpath$labels[,true_index],FG_Gibbs$labels[,true_index],
+      PG_Gibbs$labels[,true_index],CBG_Gibbs$labels[,true_index],SBMG_Gibbs$labels[,true_index]))
+
+#colnames and  rownames
+result_type=c("FMR","H.Spath","Gibbs_FG","Gibbs_PG","Gibbs_CBG","Gibbs_SBM");assess_type=c("ARI","RI","NMI","MSE_Intercept","MSE_X.1","MSE_X.2","K")
+rownames(results_summary_BIC)=result_type;colnames(results_summary_BIC)=assess_type
+rownames(results_summary_eBIC)=result_type;colnames(results_summary_eBIC)=assess_type
+rownames(true_cluster_num_assessment)=result_type;colnames(true_cluster_num_assessment)=assess_type[-7]
+colnames(true_cluster_num_labels)=result_type
+
+
+
+final_results=list(results_eBIC=results_summary_eBIC,results_BIC=results_summary_BIC,
+                   true_num_assessment=true_cluster_num_assessment,true_num_labels=true_cluster_num_labels)
+save(final_results,file=paste("~/Library/Mobile Documents/com~apple~CloudDocs/Project/图上聚类回归/sim3/","sim3_",seed,".RData",sep = ""))
+#return(final_results)
+}
+```
+
+
+
+algorithm implementation  
+```{r eval=FALSE}
+num_cores=8
+library(parallel)
+cl=makeCluster(num_cores)
+clusterExport(cl,envir = environment(),varlist = NULL)
+parLapply(cl,1:50,simulation_3_parallel)
+```
+results summary
+```{r}
+library(CLRonGraph)
+file_list=paste("~/Library/Mobile Documents/com~apple~CloudDocs/Project/图上聚类回归/sim3/",dir("~/Library/Mobile Documents/com~apple~CloudDocs/Project/图上聚类回归/sim3"),sep = "")
+load(file_list[1])
+trail_num=50
+res_BIC=final_results$results_BIC;res_BIC=apply(res_BIC,2,as.numeric)
+res_eBIC=final_results$results_eBIC;res_eBIC=apply(res_eBIC,2,as.numeric)
+for(i in 2:trail_num)
+{
+  load(file_list[i])
+  res_BIC=apply(final_results$results_BIC,2,as.numeric)+res_BIC
+  res_eBIC=apply(final_results$results_eBIC,2,as.numeric)+res_eBIC
+}
+
+summary_BIC=res_BIC/trail_num;summary_eBIC=res_eBIC/trail_num
+rownames(summary_BIC)=c("FMR","H.Spath","Gibbs_FG","Gibbs_PG","Gibbs_CBG","Gibbs_SBM");
+rownames(summary_eBIC)=c("FMR","H.Spath","Gibbs_FG","Gibbs_PG","Gibbs_CBG","Gibbs_SBM")
+summary_BIC;summary_eBIC
+write.csv(summary_BIC,"~/Library/Mobile Documents/com~apple~CloudDocs/Project/图上聚类回归/sim3_summary_BIC.csv")
+write.csv(summary_eBIC,"~/Library/Mobile Documents/com~apple~CloudDocs/Project/图上聚类回归/sim3_summary_eBIC.csv")
+```
+
+
+
+```{r}
+file_list=paste("~/Library/Mobile Documents/com~apple~CloudDocs/Project/图上聚类回归/sim3/",dir("~/Library/Mobile Documents/com~apple~CloudDocs/Project/图上聚类回归/sim3"),sep = "")
+load(file_list[1])
+res_true=final_results$true_num_assessment;res_true=apply(res_true,2,as.numeric)
+for(i in 2:trail_num)
+{
+  load(file_list[i])
+  res_true=apply(final_results$true_num_assessment,2,as.numeric)+res_true
+}
+
+summary_true=res_true/trail_num
+summary_true
+rownames(summary_true)=c("FMR","H.Spath","Gibbs_FG","Gibbs_PG","Gibbs_CBG","Gibbs_SBM")
+write.csv(summary_true,"~/Library/Mobile Documents/com~apple~CloudDocs/Project/图上聚类回归/sim3_summary_true_number.csv")
+
+```
+
+
+stability  
+```{r}
+file_list=paste("~/Library/Mobile Documents/com~apple~CloudDocs/Project/图上聚类回归/sim3/",dir("~/Library/Mobile Documents/com~apple~CloudDocs/Project/图上聚类回归/sim3"),sep = "")
+load(file_list[1])
+label_temp=final_results$true_num_labels;label_temp=apply(label_temp,2,as.numeric)
+for(i in 2:trail_num)
+{
+  load(file_list[i])
+  label_temp=rbind(label_temp,final_results$true_num_labels)
+}
+#
+N=n1+n2+n3+n4
+m=trail_num
+ari_mat=1:(m*(m-1)/2)
+for(j in 1:6)
+{temp_ari_seq=NULL
+  temp_label_matrix=matrix(label_temp[,j],nrow =N)
+  for (a in 2:ncol(temp_label_matrix)) 
+    {
+    for(b in 1:(a-1))
+      {temp_ari=ari(temp_label_matrix[,a],temp_label_matrix[,b]);temp_ari_seq=c(temp_ari_seq,temp_ari)}
+  }
+  ari_mat=cbind(ari_mat,temp_ari_seq)
+}
+ari_mat=ari_mat[,-1];colnames(ari_mat)=c("FMR","H.Spath","Gibbs_FG","Gibbs_PG","Gibbs_CBG","Gibbs_SBM")
+write.csv(ari_mat,"~/Library/Mobile Documents/com~apple~CloudDocs/Project/图上聚类回归/sim3_ari_compare.csv")
+boxplot(ari_mat)
+```
+

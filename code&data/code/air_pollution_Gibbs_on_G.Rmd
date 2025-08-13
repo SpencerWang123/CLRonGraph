@@ -1,0 +1,270 @@
+---
+title: "motivation_sample"
+author: "Spencer Wang"
+date: "2025-07-16"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# data loading
+```{r}
+#~/Library/Mobile Documents/com~apple~CloudDocs/Project/
+#F:/iCloudDrive/Project/
+#install.packages("F:/iCloudDrive/Project/图上聚类回归/CLRonGraph_0.0.0.3.tar.gz")
+library(CLRonGraph)
+
+setwd("F:/iCloudDrive/Project/聚类回归文章/China_air_pollution_dataset")
+load("data_2023.RData")
+load("data_2022.RData")
+load("data_2023city.RData")
+load("data_2022city.RData")
+var_needed=c("AQI","PM2.5_24h","PM10_24h","SO2_24h",
+"NO2_24h","O3_24h","CO_24h")
+```
+
+
+逐个提取数据——city     
+```{r}
+data_list=data_list_city1
+#缺失值填补
+data_list_fill=vector("list",length = length(data_list))
+na_station=rep(0,ncol(data_list$AQI))
+for (i in 1:length(data_list))
+{
+temp_dt=data_list[[i]]
+na_mean_fill=function(x){x[is.na(x)]=mean(x,na.rm=T);return(x)}
+data_list_fill[[i]]=as.matrix(apply(temp_dt,2,na_mean_fill))
+na_station=rbind(na_station,is.na(data_list_fill[[i]][1,]))
+}
+no_na_station=apply(na_station,2,sum)==0
+for (i in 1:length(data_list))
+{
+temp_dt=data_list_fill[[i]]
+data_list_fill[[i]]=temp_dt[,no_na_station]
+}
+names(data_list_fill)=var_needed
+aqi1=data_list_fill$AQI
+pm10=data_list_fill$PM10_24h
+pm25=data_list_fill$PM2.5_24h
+no2=data_list_fill$NO2_24h
+so2=data_list_fill$SO2_24h
+o3=data_list_fill$O3_24h
+co=data_list_fill$CO_24h
+data_list_fill_city1=data_list_fill
+no_na_station_city1=no_na_station
+```
+
+
+得到城市经纬度   
+```{r}
+city_list=colnames(aqi1)
+coord_available_df=data.frame(city=colnames(aqi1),lon=rep(NA,ncol(aqi1)),lat=rep(NA,ncol(aqi1)))
+city_coord=read.csv("F:/iCloudDrive/Project/聚类回归文章/数据部分/模拟数据-气象数据/data/city_coord_data0703.csv")
+for (i in 1:length(city_list)) 
+{
+temp_city=city_list[i]
+coord_index=grep(temp_city,city_coord$city)
+if(length(coord_index)==1)
+{
+coord_available_df$lon[i]=city_coord$lon[coord_index]
+coord_available_df$lat[i]=city_coord$lat[coord_index]
+}
+}
+
+coord_available_index=!is.na(coord_available_df$lon)
+coord_df=na.omit(coord_available_df)
+```
+计算城市之间距离倒数   
+```{r}
+dist_mat=matrix(rep(0,nrow(coord_df)^2),nrow=nrow(coord_df))
+library(geosphere)
+
+for (i in 1:nrow(coord_df)) 
+{
+for (j in 1:nrow(coord_df)) 
+{
+a=c(coord_df$lon[i],coord_df$lat[i]) ;b=c(coord_df$lon[j],coord_df$lat[j])
+d=distGeo(a,b)
+dist_mat[i,j]=d
+
+}  
+}
+
+adj_mat_dist=1/(dist_mat+1)-diag(nrow(dist_mat))
+
+#构建top K network
+top_k=function(x,k,decreasing=F)
+{
+  sort_x=sort(x,decreasing = decreasing)
+  return(as.numeric(x%in%sort_x[1:k]))
+}
+
+adj_mat_dist_k=apply(dist_mat,2,top_k,k=4)
+```
+
+
+```{r}
+aqi_y1_city=apply(data_list_fill_city1$AQI,2,mean)
+T_max1_city=nrow(data_list_fill_city1$AQI)
+library(fda)
+```
+
+```{r}
+library(CLRonGraph)
+library(fda)
+library(FdaCluReg)
+temp_seed=123
+set.seed(temp_seed)
+X_list = data_list_fill_city1[2:7]
+Y=as.numeric(aqi_y1_city)
+sample_t = c(1:T_max1_city)
+basis=create.fourier.basis(c(1,T_max1_city),nbasis = 100)
+var_ratio=0.8
+K_max = 4
+true_label=rep(1,sum(no_na_station_city1))
+method = "lad"
+ncomp_u = 10
+ncomp_l = 2
+rounds=110
+burning_period = 10
+
+
+
+N = length(Y)
+pc_scores_all = data.frame(index = 1:N)
+pca_res = NULL
+for (variable_index in 3)# Only SO2 on AQI
+{
+    X = X_list[variable_index][[1]]
+    smoothed_x = smooth.basis(sample_t, X, basis)
+    pca_x = pca.fd(smoothed_x$fd, nharm = ncomp_u, centerfns =T )
+    M = which(cumsum(pca_x$varprop) > var_ratio)[1]
+    #if (M < ncomp_l) {M = ncomp_l}
+    pc_scores = pca_x$scores[, 1:M]
+    pca_res = c(pca_res, list(pca_x))
+    pc_scores_all = data.frame(pc_scores_all, pc_scores)
+}
+pc_scores_all = pc_scores_all[, -1]
+
+#
+reg_dt = as.data.frame(scale(data.frame(y = Y, pc_scores_all)[coord_available_index,]))
+```
+
+## hypothesis test    
+```{r}
+geo_test=local_structure_test(reg_dt =reg_dt,adj_mat = adj_mat_dist_k,trials_time = 100,group_scale = 40)
+```
+
+```{r}
+plot(density(geo_test$rsq_stat),col="red",type="l",xlim=c(0.15,0.7),ylim=c(0,13),main="",xlab="Explained variance ratio");
+lines(density(geo_test$sq_stat),col="blue",type="l")
+legend("topright",legend=c("Test Statistic","Null Distribution"),col = c("red","blue"),lwd = 2)
+sum(geo_test$results)/100
+```
+## CLR implementation   
+```{r}
+library(flexmix)
+Gibbs_RG=GCLR(reg_dt = reg_dt,adj_mat = adj_mat_dist_k,K_seq = 2:5,true_label = rep(1,nrow(reg_dt)),method = "ls",partition = "mixed",seed = temp_seed,greedy_refine = T,G_type = "binary")
+Gibbs_FG=GCLR(reg_dt = reg_dt,adj_mat = NULL,K_seq = 2:5,true_label = rep(1,nrow(reg_dt)),method = "ls",partition = "mixed",seed = temp_seed,greedy_refine = T,G_type = "binary")
+#construction_of_network
+FMR_FG=GCLR_FMR(reg_dt=reg_dt, K_seq=2:5, true_label=rep(1,nrow(reg_dt)), seed = 1, real_coefficients = NULL, 
+    partition = "mixed", method = "ls")
+
+```
+画图   
+```{r}
+par(mfrow=c(1,2))
+col_seq=c("red","blue","green","orange")
+plot(coord_df$lon,coord_df$lat,col=col_seq[Gibbs_FG$best_model_BIC$label],main = "FG.BIC")
+plot(coord_df$lon,coord_df$lat,col=col_seq[Gibbs_FG$best_model_eBIC$label],main = "FG.eBIC")
+
+par(mfrow=c(1,2))
+col_seq=c("red","blue","green","orange")
+plot(coord_df$lon,coord_df$lat,col=col_seq[FMR_FG$best_model_BIC$label],main = "FG.BIC")
+plot(coord_df$lon,coord_df$lat,col=col_seq[FMR_FG$best_model_eBIC$label],main = "FG.eBIC")
+
+par(mfrow=c(1,2))
+col_seq=c("red","blue","green","orange")
+plot(coord_df$lon,coord_df$lat,col=col_seq[Gibbs_RG$best_model_BIC$label],main = "RG.BIC")
+plot(coord_df$lon,coord_df$lat,col=col_seq[Gibbs_RG$best_model_eBIC$label],main = "RG.eBIC")
+```
+```{r}
+library(geojsonsf)
+library(sf)
+library(ggplot2)
+######################################
+# source1 民政部
+# link: https://mp.weixin.qq.com/s/qj1SRc6D8sgYJYaZzDux6Q
+######################################
+##  API前缀
+API_pre = "http://xzqh.mca.gov.cn/data/"
+## 1.全国
+China = st_read(dsn = paste0(API_pre, "quanguo.json"), 
+                    stringsAsFactors=FALSE) 
+st_crs(China) = 4326
+```
+
+
+```{r,eval=FALSE}
+save(China,file="~/Library/Mobile Documents/com~apple~CloudDocs/Project/图上聚类回归/air_pollution/China_map.RData")
+save(coord_df,file="~/Library/Mobile Documents/com~apple~CloudDocs/Project/图上聚类回归/air_pollution/city_coord.RData")
+save(geo_test,file = "~/Library/Mobile Documents/com~apple~CloudDocs/Project/图上聚类回归/air_pollution/geo_test.RData")
+save(Gibbs_FG,file="~/Library/Mobile Documents/com~apple~CloudDocs/Project/图上聚类回归/air_pollution/Gibbs_FG.RData")
+save(Gibbs_RG,file="~/Library/Mobile Documents/com~apple~CloudDocs/Project/图上聚类回归/air_pollution/Gibbs_RG.RData")
+save(FMR_FG,file = "~/Library/Mobile Documents/com~apple~CloudDocs/Project/图上聚类回归/air_pollution/FMR_FG.RData")
+```
+
+
+```{r}
+# plot
+g0=ggplot(China)+
+  geom_sf()+
+   #labs(title="Ministry of Civil of PRC",x="Lon",y="Lat")
+  labs(x="Lon",y="Lat") 
+# FMR 
+coord_fmr=data.frame(lon=coord_df$lon,lat=coord_df$lat,col=col_seq[FMR_FG$best_model_BIC$label])
+g_fmr=g0+
+  geom_point(data = coord_fmr, 
+             aes(x = lon, y = lat, color = col), 
+             size = 1)+
+  theme_minimal()+
+  theme(panel.grid = element_blank(),   
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+        legend.position = "none")+
+  labs(title="Clusters from FMR(BIC)")
+g_fmr
+
+
+# Gibbs FG 
+coord_gibbs_fg=data.frame(lon=coord_df$lon,lat=coord_df$lat,col=col_seq[Gibbs_FG$best_model_BIC$label])
+g_gclr=g0+
+  geom_point(data = coord_gibbs_fg, 
+             aes(x = lon, y = lat, color = col), 
+             size = 1)+
+  theme_minimal()+
+  theme(panel.grid = element_blank(),   
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+        legend.position = "none")+
+  labs(title="Clusters from G-CLR(BIC)")
+g_gclr
+
+# FMR 
+coord_gc_gclr=data.frame(lon=coord_df$lon,lat=coord_df$lat,col=col_seq[Gibbs_RG$best_model_eBIC$label])
+g_gc_gclr=g0+
+  geom_point(data = coord_gc_gclr, 
+             aes(x = lon, y = lat, color = col), 
+             size = 1)+
+  theme_minimal()+
+  theme(panel.grid = element_blank(),   
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.5),
+        legend.position = "none")+
+  labs(title="Clusters from Gc-G-CLR(eBIC)")
+g_gc_gclr
+```
+

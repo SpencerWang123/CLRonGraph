@@ -1,0 +1,213 @@
+---
+title: "Hypothesis_test_GCLR"
+author: "Spencer Wang"
+date: "2025-07-16"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# method 1: local test. (Failed)   
+test whether there are local adjacency similarity on the whole network which means neighborhoods on network share similiar regression pattern with each other.  
+test design:    
+1. q steps' transition matrix network $A^q$. gathering local sample for each sample. samples should be be at least 2 times of the number of predictors in regression model.   
+2. perform local estimation for node $V_i$, and calcluate local $R^2$ denote as $R^1_i$.   
+3. shuffle the label of the rest node on network 100 times. then perform local estimation and  calculated local residual $R^0_1$ to $R^0_100$.   
+4. perform a permutation test. when $R^1_i$ is significant higher among $R^0$s, there are significant adjacent regression pattern on node $V_i$.   
+
+# method 2: whole network test.(Failed)    
+1. community detcetion using louvain methods at K communities.
+2. estimate regression pattern for each community. calculate the mean value of residuals for each node $\mu_1$
+3. permutate the regression response for each node and perform step1 and step2 on new datasets for 100 times $\mu_{0,1}-\mu_{0,100}$.   
+
+# method 3: closely connected subgraph and random subgroup (sucessful try)      
+1. greedyly searching for a closely connected scale-m-subgraph SG in a network with different initial node setting---n subgraphs   
+2. random select m nodes forms a random subgroup RSG---n subgroups 
+3. coefficient estimation for each subgraph and sub group, record the  R^2 and residuals   
+4. test whether the statistics from real network is significant different from the random one  
+
+so far method 2 can't garantee a stable type 1 error when H0 is true at alpha and a much higher type 2 error than we expected, so we tried method 3 which is similar with our sampling method published on Physica A.  
+# data setting  
+```{r}
+#generating X & Y. #############################################################
+library(CLRonGraph)
+seed=1
+set.seed(seed)
+n1=25;n2=25;n3=25;n4=25;
+N=100
+X=as.matrix(cbind(rep(1,N),#intercept
+                  rnorm(N),#X1
+                  rnorm(N)))#X2
+X_no_intercept=X[,-1]
+#beta (n*4)*3
+coef_mat=matrix(c(0,0,0,0,
+                  1,1,-1,-1,
+                  1,-1,1,-1),byrow = T,nrow = 3)#3*4
+
+#epsilon #homoscedastic #identical error among groups #Normal Distribution
+e0=rnorm(N,0,0.2)
+hetero_e=rep(1,N)#0.5*(X_no_intercept[,1]+X_no_intercept[,2])
+e=e0*hetero_e
+
+Y_all=X%*%coef_mat+e#Y 
+Y=c(Y_all[1:n1,1],Y_all[(n1+1):(n1+n2),2],Y_all[(n1+n2+1):(n1+n2+n3),3],Y_all[(n1+n2+n3+1):N,4])
+K_seq=2:6
+#generating network#############################################################
+library(igraph)
+#adjacency full connect
+adj_full=matrix(rep(1,N^2),ncol=N);
+adj_full=adj_full-diag(N);
+colnames(adj_full)=1:N;rownames(adj_full)=colnames(adj_full)
+
+#adjacency path connect
+adj_path=matrix(rep(0,N^2),ncol=N);
+adj_path[1:(N-1),2:N]=diag(N-1);
+adj_path=adj_path+t(adj_path)
+colnames(adj_path)=1:N;rownames(adj_path)=colnames(adj_path)
+
+#adjacency chessboard
+edge_length=N^0.5
+clu_edg_len=edge_length/2
+CB_G=make_lattice(dimvector = c(edge_length,edge_length))
+layout_mat=matrix(1:N,byrow = T,nrow = edge_length)
+group_1_index=as.numeric(layout_mat[1:clu_edg_len,1:clu_edg_len])
+group_2_index=as.numeric(layout_mat[clu_edg_len+(1:clu_edg_len),1:clu_edg_len])
+group_3_index=as.numeric(layout_mat[1:clu_edg_len,clu_edg_len+(1:clu_edg_len)])
+group_4_index=as.numeric(layout_mat[clu_edg_len+(1:clu_edg_len),clu_edg_len+(1:clu_edg_len)])
+col_mat=data.frame(id=c(group_1_index,group_2_index,group_3_index,group_4_index),
+                   col=rep(c("red","blue","green","orange"),c(n1,n2,n3,n4)),true_label=rep(1:4,c(n1,n2,n3,n4)))
+col_mat=col_mat[order(col_mat$id),]
+id_order=c(group_1_index,group_2_index,group_3_index,group_4_index)#used to rearrange order of row of reg data 
+adj_chessboard=as_adjacency_matrix(CB_G)
+
+#adjacency SBM
+set.seed(123)
+a=0.2;b=0.02
+pref_mat=matrix(c(a,b,b,b,
+                  b,a,b,b,
+                  b,b,a,b,
+                  b,b,b,a),byrow = T,nrow = 4)
+SBM_G=sample_sbm(N,pref_mat,block.sizes=c(n1,n2,n3,n4))
+adj_sbm=as.matrix(as_adjacency_matrix(SBM_G))
+
+##algorithm implementation######################################################
+library(flexmix)
+temp_seed=seed
+#reg data & real_cofficients
+reg_dt=data.frame(y=Y,X_no_intercept)#[order(id_order),]
+real_coefficients=t(coef_mat[,rep(1:4,c(n1,n2,n3,n4))])
+reg_dt_CBG=data.frame(y=Y,X_no_intercept)[order(id_order),]
+real_coefficients_CBG=t(coef_mat[,rep(1:4,c(n1,n2,n3,n4))])[order(id_order),]
+true_label_CBG=col_mat$true_label
+
+```
+
+
+## test statistics    
+under H0, mean value of rsq_SG equals mean value of rsq_RSG. based on  the independent and identical distribution property among samples, and the support set of the random variable is confined between 0 and 1, thus the expectation and variance is bound to exist. Base on CLT, a hypothesis test could be performed based on gaussian.  
+
+
+# path graph   
+```{r}
+library(CLRonGraph)
+adj_mat=adj_path
+temp_reg_dt=reg_dt
+PG_test1=local_structure_test(reg_dt = temp_reg_dt,adj_mat = adj_mat,trials_time = 100)
+test0_res=NULL
+test0_stat=NULL
+for(t in 1:100)
+{
+  set.seed(t)
+  reg_dt_random=temp_reg_dt[sample(nrow(temp_reg_dt),nrow(temp_reg_dt)),]
+  PG_test0=local_structure_test(reg_dt = reg_dt_random,adj_mat = adj_mat,trials_time = 1,seed = t)
+  test0_res=c(test0_res,PG_test0$results)
+  test0_stat=c(test0_stat,PG_test0$sq_stat)
+  #print(t)
+}
+
+plot(density(PG_test0$rsq_stat),col="red",type="l",xlim=c(0,1));lines(density(test0_stat),col="blue",type="l")
+plot(density(PG_test1$rsq_stat),col="red",type="l",xlim=c(0,1));lines(density(PG_test1$sq_stat),col="blue",type="l")
+sum(test0_res)/100
+sum(PG_test1$results)/100
+
+write.csv(data.frame(NULL_stat=PG_test1$rsq_stat,H0_stat=test0_stat,H1_stat=PG_test1$sq_stat),"~/Library/Mobile Documents/com~apple~CloudDocs/Project/图上聚类回归/test_stat_PG.csv")
+```
+```{r}
+test_PG=read.csv("~/Library/Mobile Documents/com~apple~CloudDocs/Project/图上聚类回归/test_stat_PG.csv")
+plot(density(test_PG$H0_stat),col="red",type="l",xlim=c(0,1),ylim=c(0,17),main="",xlab="Explained variance ratio");
+lines(density(test_PG$H1_stat),col="blue",type="l")
+lines(density(test_PG$NULL_stat),col="black",type="l")
+legend("topleft",legend=c("Null Distribution","Test Statistic on PG_A","Test Statistic on PG_B"),col = c("black","red","blue"),lwd = 2)
+
+```
+
+
+# Chessboard graph     
+```{r}
+library(CLRonGraph)
+adj_mat=as.matrix(adj_chessboard)
+temp_reg_dt=reg_dt_CBG
+PG_test1=local_structure_test(reg_dt = temp_reg_dt,adj_mat = adj_mat,trials_time = 100)
+test0_res=NULL
+test0_stat=NULL
+for(t in 1:100)
+{
+  set.seed(t)
+  reg_dt_random=temp_reg_dt[sample(nrow(temp_reg_dt),nrow(temp_reg_dt)),]
+  PG_test0=local_structure_test(reg_dt = reg_dt_random,adj_mat = adj_mat,trials_time = 1,seed = t)
+  test0_res=c(test0_res,PG_test0$results)
+  test0_stat=c(test0_stat,PG_test0$sq_stat)
+  #print(t)
+}
+
+plot(density(PG_test0$rsq_stat),col="red",type="l",xlim=c(0,1));lines(density(test0_stat),col="blue",type="l")
+plot(density(PG_test1$rsq_stat),col="red",type="l",xlim=c(0,1));lines(density(PG_test1$sq_stat),col="blue",type="l")
+sum(test0_res)/100
+sum(PG_test1$results)/100
+write.csv(data.frame(NULL_stat=PG_test1$rsq_stat,H0_stat=test0_stat,H1_stat=PG_test1$sq_stat),"~/Library/Mobile Documents/com~apple~CloudDocs/Project/图上聚类回归/test_stat_CBG.csv")
+```
+
+```{r}
+test_CBG=read.csv("~/Library/Mobile Documents/com~apple~CloudDocs/Project/图上聚类回归/test_stat_CBG.csv")
+plot(density(test_CBG$H0_stat),col="red",type="l",xlim=c(0,1),ylim=c(0,17),main="",xlab="Explained variance ratio");
+lines(density(test_CBG$H1_stat),col="blue",type="l")
+lines(density(test_CBG$NULL_stat),col="black",type="l")
+legend("topleft",legend=c("Null Distribution","Test Statistic on CBG_A","Test Statistic on CBG_B"),col = c("black","red","blue"),lwd = 2)
+
+```
+
+# SBM      
+```{r}
+library(CLRonGraph)
+adj_mat=as.matrix(adj_sbm)
+temp_reg_dt=reg_dt
+PG_test1=local_structure_test(reg_dt = temp_reg_dt,adj_mat = adj_mat,trials_time = 100)
+test0_res=NULL
+test0_stat=NULL
+for(t in 1:100)
+{
+  set.seed(t)
+  reg_dt_random=temp_reg_dt[sample(nrow(temp_reg_dt),nrow(temp_reg_dt)),]
+  PG_test0=local_structure_test(reg_dt = reg_dt_random,adj_mat = adj_mat,trials_time = 1,seed = t)
+  test0_res=c(test0_res,PG_test0$results)
+  test0_stat=c(test0_stat,PG_test0$sq_stat)
+  #print(t)
+}
+
+plot(density(PG_test0$rsq_stat),col="red",type="l",xlim=c(0,1));lines(density(test0_stat),col="blue",type="l")
+plot(density(PG_test1$rsq_stat),col="red",type="l",xlim=c(0,1));lines(density(PG_test1$sq_stat),col="blue",type="l")
+sum(test0_res)/100
+sum(PG_test1$results)/100
+write.csv(data.frame(NULL_stat=PG_test1$rsq_stat,H0_stat=test0_stat,H1_stat=PG_test1$sq_stat),"~/Library/Mobile Documents/com~apple~CloudDocs/Project/图上聚类回归/test_stat_SBM.csv")
+```
+
+```{r}
+test_SBM=read.csv("~/Library/Mobile Documents/com~apple~CloudDocs/Project/图上聚类回归/test_stat_SBM.csv")
+plot(density(test_SBM$H0_stat),col="red",type="l",xlim=c(0,1),ylim=c(0,17),main="",xlab="Explained variance ratio");
+lines(density(test_SBM$H1_stat),col="blue",type="l")
+lines(density(test_SBM$NULL_stat),col="black",type="l")
+legend("topleft",legend=c("Null Distribution","Test Statistic on SBM_A","Test Statistic on SBM_B"),col = c("black","red","blue"),lwd = 2)
+
+```
